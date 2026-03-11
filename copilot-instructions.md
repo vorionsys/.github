@@ -220,6 +220,129 @@ When BMAD agents provide architectural guidance or planning artifacts, treat the
 
 ---
 
+## GitHub Etiquette & Best Practices
+
+### Commit Discipline
+- **Atomic commits** — One logical change per commit. Never bundle unrelated fixes.
+- **Conventional Commits** — Format: `type(scope): message`. Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `perf`, `chore`, `patent`.
+- **Commit messages that teach** — First line is the *what*, body is the *why*. Future you reads these at 2am during an incident.
+- **No WIP commits on `main`** — Squash or amend before merging. Every commit on `main` should build and pass tests.
+
+### Pull Request Standards
+- **PR title = commit message** — Use conventional format. Reviewers skim titles.
+- **PR description template**: What changed, why, how to test, screenshots (if UI), breaking changes, related issues.
+- **Small PRs win** — Target <400 lines. Split large features into stacked PRs. Large PRs get rubber-stamped; small PRs get real reviews.
+- **Self-review first** — Review your own diff before requesting others. Catch the obvious stuff yourself.
+- **Draft PRs for early feedback** — Open a draft when design questions remain. Don't wait until "done" to get input.
+- **Link issues** — Every PR should reference an issue. Use `Closes #123` or `Relates to #123`.
+- **Respond to every review comment** — Even if it's just "Done" or "Won't fix because X". Never leave threads unresolved.
+
+### Branch Strategy
+- **`main`** is always deployable. Period.
+- **Feature branches**: `feat/short-description`, `fix/issue-number-slug`, `refactor/module-name`
+- **No long-lived branches** — Merge or rebase within days, not weeks. Stale branches are tech debt.
+- **Rebase before merge** — Keep linear history. Merge commits are noise.
+
+### Code Review Mindset
+- Review for **correctness, security, performance, and maintainability** — in that order.
+- Don't just look at the diff — look at what the diff **touches**. Adjacent bugs hiding next to the change are the most dangerous.
+- Flag **pre-existing issues** when you see them, even if this PR didn't introduce them.
+- Nits are fine but label them clearly. Never block a PR on style alone.
+- Ask "what happens under load?" and "what happens when this fails?" on every endpoint change.
+
+### Issue Tracking
+- **Every bug gets an issue** — Even if you fix it in 5 minutes. The log matters.
+- **Issues describe symptoms AND context** — "Login fails" is useless. "Login returns 500 when email contains + character on Neon PostgreSQL" is actionable.
+- **Labels are mandatory**: `bug`, `feature`, `docs`, `security`, `performance`, `breaking-change`
+- **Close with context** — When closing an issue, reference the commit or PR that resolved it.
+
+---
+
+## Analysis & Coding Standards
+
+### Before You Write Code
+1. **Read the existing code** — Understand the module you're touching. Read callers, callees, tests. Don't guess at interfaces.
+2. **Check for existing patterns** — If the codebase has a way of doing X, follow it. Consistency beats cleverness.
+3. **Identify blast radius** — What other modules, tests, or deployments does this change affect? Run a dependency trace.
+4. **Write the test first** — Or at minimum, write the test assertion first. Know what "correct" looks like before implementing.
+
+### Code Quality Mandates
+- **Type everything** — Python: full type annotations + mypy strict. TypeScript: strict mode, no `any` unless truly unavoidable.
+- **Validate at boundaries** — Every API endpoint validates input (Pydantic/Zod). Every DB query validates output shape. Trust nothing from outside your module.
+- **Error messages must be diagnostic** — Include the entity ID, the operation attempted, the constraint violated. "Operation failed" is never acceptable.
+- **Structured logging** — Use structlog (Python) or pino (TS). Include `entity_id`, `operation`, `duration_ms`, `trust_tier` in every log line. JSON format in production.
+- **No magic numbers** — Constants go in `constants_bridge.py` or `shared-constants`. Every threshold, limit, and boundary has a name and a comment explaining *why* that value.
+- **Functions do one thing** — If you're writing a function over 40 lines, it probably does two things. Split it.
+- **Naming reveals intent** — `calculate_decay_factor()` not `calc()`. `is_trust_threshold_exceeded()` not `check()`. Verbose is better than ambiguous.
+
+### Python-Specific
+- **async all the way** — If a function touches I/O, it's async. No sync wrappers around async code.
+- **Context managers for resources** — DB sessions, file handles, HTTP clients all use `async with`.
+- **Pydantic models for all data boundaries** — Request → Pydantic model → business logic → Pydantic model → Response. Never pass raw dicts through business logic.
+- **Dependency injection via FastAPI `Depends()`** — Services, DB sessions, auth, config. Testable by design.
+
+### TypeScript-Specific
+- **Zod schemas at every boundary** — API inputs, config parsing, external data. Parse, don't validate.
+- **Prefer `const` assertions and discriminated unions** over loose string types.
+- **ESM imports only** — `.js` extensions in imports (resolved to `.ts` by Vitest plugin). Never use `.ts` extensions in import paths.
+- **Turborepo task ordering** — Never skip `^build` dependencies. If your package depends on `contracts`, it builds after `contracts`.
+
+### Testing Standards
+- **Unit tests for logic** — Pure functions, calculation engines, state machines.
+- **Integration tests for flows** — API endpoint → DB → response cycle. Use real (in-memory) databases, not mocks.
+- **Adversarial tests for security** — Deliberately craft malicious inputs. Test tripwires with bypass attempts. Test auth with expired/invalid tokens.
+- **Property-based tests for invariants** — Use Hypothesis (Python) or fast-check (TS) for trust score boundaries, proof chain integrity, decay floor guarantees.
+- **Chaos tests for resilience** — Simulate DB failures, Redis timeouts, LLM provider outages. Verify graceful degradation.
+- **Coverage is a floor, not a ceiling** — 85% minimum (CI-enforced). But 100% coverage with no assertions is worse than 60% with real assertions.
+
+---
+
+## Architecture & Latency Guidance
+
+### Performance Mindset
+Every change must be evaluated through the latency lens. The question is never "does it work?" — it's "does it work **fast enough under load**?"
+
+### Latency Budget (enforcement pipeline)
+| Stage | Budget | Technique |
+|-------|--------|-----------|
+| L0 Velocity check | <2ms | In-memory counter, no I/O |
+| L1 Tripwire scan | <5ms | Compiled regex, pre-warmed |
+| L2 Critic (LLM) | <3s | Parallel dispatch, first-response-wins, timeout at 5s |
+| Trust resolution | <10ms | 30s in-memory cache, async DB fallback |
+| Proof recording | <15ms | Async write, don't block response |
+| **Total p99** | **<3.5s** | LLM is the bottleneck; everything else must be sub-millisecond |
+
+### Architecture Principles
+1. **Cache aggressively, invalidate precisely** — Trust scores (30s TTL), policy rules (on-change reload), compiled regexes (startup). Never cache auth decisions.
+2. **Async I/O everywhere** — Every DB query, HTTP call, and file read is non-blocking. The event loop is sacred.
+3. **Fail-open vs fail-closed decisions are explicit** — Trust cache miss = fail-closed (deny). Redis down = degrade to in-memory counters. LLM timeout = use last cached critic result.
+4. **Connection pooling is non-negotiable** — SQLAlchemy async pool for PostgreSQL, NullPool for Neon serverless, httpx connection pools for LLM providers.
+5. **Horizontal scaling assumptions** — Every service is stateless except for the DB. No in-process state that can't be lost. Redis or DB for shared state.
+6. **Observability from day one** — Every endpoint logs: `duration_ms`, `trust_tier`, `enforcement_decision`, `cache_hit`. You can't optimize what you can't measure.
+
+### Scaling Patterns Used
+- **Read path**: In-memory cache → Redis → PostgreSQL. Three tiers, each 10x slower than the prior.
+- **Write path**: Async queue → batch insert. Proof records are append-only, optimized for write throughput.
+- **LLM fan-out**: TMR consensus dispatches to 3+ providers in parallel. First 2 agreeing responses win. Slow providers get exponentially derated.
+- **Rate limiting**: Token bucket (burst) + sliding window (sustained) + hourly cap. All in-memory with Redis sync for multi-instance.
+- **Circuit breaker**: Per-provider CLOSED→OPEN→HALF_OPEN state machine. Failure threshold = 5 in 60s. Half-open probe after 30s cooldown.
+
+### When Suggesting Architecture Changes
+- **Always propose with latency impact** — "This adds ~Xms to the hot path because Y"
+- **Show the tradeoff** — "We gain Z reliability but add Xms. Here's how to mitigate."
+- **Benchmark before recommending** — Don't say "this is faster." Show the numbers or at least the complexity analysis.
+- **Consider the cold start** — Vercel serverless has cold start penalties. Pre-warm critical paths. Lazy-load heavy modules.
+- **Think in percentiles** — p50 doesn't matter. p99 is what wakes you up at 3am. Design for the tail.
+- **Identify the bottleneck first** — Profile, don't guess. `cProfile`, `py-spy`, or `clinic.js` before optimizing.
+
+### Query Optimization Rules
+- **Index every WHERE clause column** — Especially on trust queries (entity_id + plan_id).
+- **Explain before shipping** — Run `EXPLAIN ANALYZE` on every new query. No sequential scans on tables over 10K rows.
+- **Batch reads, stream writes** — Fetch in bulk (IN clause), write in batches (executemany). N+1 is a bug, not a code smell.
+- **Connection-aware for serverless** — Neon requires NullPool. Connection count = concurrent Lambda invocations x 1.
+
+---
+
 ## Constants Synchronization
 
 Trust model constants must stay synchronized between:
@@ -254,3 +377,7 @@ When encountering and resolving issues, document inline or in commits:
 - Never create fire-and-forget async tasks without error handling
 - Never break the proof chain hash linkage
 - Never allow trust overrides on L1 tripwires
+- Never optimize without profiling first — measure, don't guess
+- Never add a cache without defining its invalidation strategy
+- Never introduce a new external call in the hot path without a timeout and fallback
+- Never deploy a query without running EXPLAIN ANALYZE on production-scale data
