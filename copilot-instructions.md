@@ -381,3 +381,272 @@ When encountering and resolving issues, document inline or in commits:
 - Never add a cache without defining its invalidation strategy
 - Never introduce a new external call in the hot path without a timeout and fallback
 - Never deploy a query without running EXPLAIN ANALYZE on production-scale data
+
+---
+
+## Testing System — Organization & Strategy
+
+### Test Pyramid Philosophy
+
+Tests are organized into **8 categories** with increasing blast radius. Run them bottom-up: fast unit tests catch most bugs; slow E2E tests validate the full stack. Every test file has a docstring declaring its category and philosophy.
+
+### Cognigate Test Map (Python — 38 files, ~742 tests)
+
+| Category | Files | ~Tests | Purpose | Examples |
+|----------|-------|--------|---------|----------|
+| **Unit** | 16 | 362 | Pure logic, no I/O, <10ms each | `test_circuit_breaker.py` (state machine), `test_trust_decay.py` (9 milestones), `test_tripwires.py` (60 regex patterns), `test_tmr_consensus.py` (voting), `test_monte_carlo.py` (bands), `test_self_healing.py` (GA) |
+| **Integration** | 13 | 251 | API endpoint → DB → response with real in-memory SQLite | `test_trust.py` (lifecycle), `test_enforce.py` (policy bypass), `test_compliance.py` (114 tests — largest), `test_deepspace.py`, `test_admin.py` |
+| **Adversarial** | 1 | 28 | Deliberate attack simulations: injection, evasion, forgery, replay | `test_adversarial.py` — tests every known bypass pattern against the governance runtime |
+| **Chaos** | 1 | 15 | Dependency failures, concurrency races, extreme load degradation | `test_chaos.py` — simulates DB down, Redis timeout, concurrent request storms |
+| **Property** | 1 | 27 | Hypothesis-based: trust score bounds, tier completeness, math invariants | `test_property.py` — proves properties hold for ALL inputs, not just examples |
+| **Invariant** | 1 | 29 | "Laws of physics" — things that must ALWAYS/NEVER be true | `test_invariants.py` — proof chain integrity, trust bounds 0–1000, tripwire absoluteness |
+| **Regression** | 1 | 24 | Pinned golden values — exact expected outputs to prevent past bugs | `test_regressions.py` — if these break, a previously-fixed bug has resurfaced |
+| **E2E** | 1 | 5 | Full INTENT → ENFORCE → PROOF as single transaction | `test_e2e_pipeline.py` — the complete governance flow |
+| **Smoke** | 1 | 1 | Trivial sanity check (build verification) | `test_hello.py` |
+
+### Vorion Test Map (TypeScript — ~378 files)
+
+| Location | Files | Organization | Key Focus Areas |
+|----------|-------|-------------|-----------------|
+| `tests/unit/` | 87 | 17 subdirectories by domain | adapters, cognigate, enforce, governance, intent, proof, security, trust-engine |
+| `tests/integration/` | 20 | With `setup.ts`, `helpers.ts`, `factories.ts` | Real PostgreSQL 15 + Redis 7, transaction rollback, JWT generation |
+| `tests/security/` | 17 | One file per threat class | auth, csrf, encryption, gdpr, injection, rate-limiting, ssrf, timing-attacks, tenant-isolation |
+| `tests/adversarial/` | 3 | Proof attacks, SSO attacks, trust attacks | Deliberate manipulation of trust signals and proof chains |
+| `tests/property/` | 3 | Crypto, trust enforcement, trust properties | fast-check style property testing |
+| `tests/e2e/` | 4+ | Playwright config, phase6 subdirectory | auth-flow, intent-lifecycle, rbac-flow |
+| `tests/chaos/` | 1 | Resilience testing | Cascading failure simulation |
+| `tests/load/` | 1 | k6/artillery style | Phase 6 load test benchmarks |
+| `packages/**/__tests__/` | 192 | Co-located per package | security (55), a3i (31), atsf-core (24), council (15), platform-core (13), ai-gateway (9) |
+| `apps/**` | 50 | Per-app tests + React component tests | agentanchor (23), dashboard (12), kaizen (9), aurais (4) |
+
+### Test Infrastructure
+
+**Cognigate fixtures** (`tests/conftest.py`):
+- `async_client` — Full ASGI client with in-memory SQLite, auth bypass, policy engine initialized
+- `test_db` — Standalone `AsyncSession` for repository-level tests
+- `sample_plan` / `high_risk_plan` — Pre-built plan dicts for enforce tests
+
+**Vorion test utilities**:
+- `tests/helpers/tenant-context.ts` (352 lines) — `createMockTenantContext()`, `withTenantContext()`, `TEST_TENANT_ID`
+- `tests/integration/setup.ts` (441 lines) — DB setup/teardown, transaction management, JWT generation, Fastify server
+- `tests/integration/helpers.ts` (479 lines) — `apiRequest()` builder with auth
+- `tests/integration/factories.ts` (739 lines) — `TenantFactory`, `IntentFactory`, `EntityFactory` with sensible defaults
+
+### CI Test Execution
+
+| Pipeline | Coverage | Special |
+|----------|----------|---------|
+| Cognigate CI | **85%** minimum, `pytest --cov`, single Python 3.13 | lint (ruff), typecheck (mypy), security (pip-audit + bandit) |
+| Vorion CI | **80%** branches/functions/lines/statements | 8 parallel jobs, PostgreSQL 15 + Redis 7 services, license check, tier consistency |
+| Mutation Testing | **>80%** mutation score on core modules | Weekly: Stryker (TS contracts + platform-core), mutmut (Python circuit_breaker, velocity, tripwires, signatures) |
+
+### Test Writing Rules
+1. **Name reveals intent** — `test_trust_decay_applies_50_percent_floor_at_182_days` not `test_decay_3`
+2. **One assertion per concept** — Multiple asserts are fine if testing one logical behavior
+3. **Arrange-Act-Assert** — Clear separation. If the "Arrange" is >10 lines, use a fixture or factory
+4. **No test interdependence** — Each test runs in isolation. No shared mutable state. No ordering assumptions.
+5. **Adversarial tests use real attack patterns** — Don't invent toy examples. Use OWASP Top 10 payloads.
+6. **Regression tests pin exact values** — Not "roughly 500" but "exactly 523". These are canaries.
+7. **Property tests prove universals** — "For ALL scores 0–1000" not "for score 500 and 999"
+8. **Every bug fix ships a regression test** — The test must fail on the old code and pass on the fix
+
+---
+
+## Knowledge Base Protocol
+
+Every issue encountered, solution applied, and lesson learned gets captured. This is not optional — it's how the team compounds knowledge over time.
+
+### What Gets Captured
+
+| Category | Trigger | Where to Document |
+|----------|---------|-------------------|
+| **Bug fix** | Any non-trivial fix | Commit message body + inline comment at fix site |
+| **Architecture decision** | Choosing between approaches | `_bmad-output/planning-artifacts/` or ADR file |
+| **Performance finding** | Benchmark result, profiling output | Commit message + `docs/` if broadly applicable |
+| **Security discovery** | Vulnerability found/fixed | Issue with `security` label + commit + inline |
+| **Integration gotcha** | External service quirk (Neon, Vercel, Supabase) | Inline comment with `# GOTCHA:` prefix |
+| **Test failure pattern** | Flaky test root cause, new edge case | Regression test + docstring explaining the scenario |
+| **Deployment lesson** | CI/CD config that broke, env var missing | `docs/deployment/` or workflow comment |
+
+### Documentation Format
+
+For commit messages:
+```
+fix(trust): prevent negative decay factor at boundary
+
+What broke: trust_decay_factor returned -0.003 when days_inactive=0
+  and last_activity was in the future (clock skew).
+Why: Linear interpolation didn't clamp the lower bound.
+Fix: Added max(0.0, factor) guard before return.
+Prevention: Added property test — decay factor is always in [0.0, 1.0]
+  for any non-negative days_inactive value (test_property.py).
+Lesson: Clock skew is real in distributed systems. Always clamp
+  computed values to their valid domain.
+```
+
+For inline code:
+```python
+# GOTCHA: Neon PostgreSQL requires NullPool — connection pooling is
+# handled server-side. Using standard pooling causes "too many clients"
+# errors under load. See: https://neon.tech/docs/connect/connection-pooling
+# Discovered: 2026-02-15, cost us 2h of debugging during load test.
+```
+
+### Cross-Repo Knowledge Sharing
+- **Constants sync**: Changes in `constants_bridge.py` MUST be mirrored to `shared-constants/` — document the sync in both commit messages
+- **Pattern libraries**: When a pattern works well (e.g., circuit breaker state machine), reference it in new modules: `# Pattern: see circuit_breaker.py for the canonical state machine implementation`
+- **Failure post-mortems**: Major incidents get a `## Post-Mortem` section in the relevant issue before closing
+
+---
+
+## Agent Coding Specialist — Lifecycle & Orchestration
+
+### Agent Architecture Overview
+
+The Vorion agent system has a **dual-layer** architecture. The Python Cognigate API is the **governance enforcement layer** (stateless, API-only). The TypeScript packages implement the **agent lifecycle and orchestration layer**.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  AGENT LIFECYCLE (TypeScript)         │
+│                                                      │
+│  ┌──────────┐   ┌────────────┐   ┌──────────────┐  │
+│  │ A3I      │   │ Runtime    │   │ ATSF-Core    │  │
+│  │Orchestr. │──▶│ IntentPipe │──▶│ Sandbox      │  │
+│  │          │   │ TrustFacade│   │ Training     │  │
+│  └────┬─────┘   └────┬───────┘   └──────────────┘  │
+│       │              │                               │
+│       ▼              ▼                               │
+│  ┌─────────────────────────┐                        │
+│  │   GOVERNANCE API (Python)│                        │
+│  │   Cognigate FastAPI      │                        │
+│  │   /v1/intent             │                        │
+│  │   /v1/enforce            │                        │
+│  │   /v1/proof              │                        │
+│  │   /v1/trust              │                        │
+│  │   /v1/deepspace          │                        │
+│  └─────────────────────────┘                        │
+└─────────────────────────────────────────────────────┘
+```
+
+### The Full Agent Intent Lifecycle
+
+Every agent action follows this flow. No shortcuts, no exceptions:
+
+```
+1. INTENT SUBMISSION
+   Agent declares what it wants to do
+   → IntentRequest { action, parameters, risk_signals, entity_id }
+
+2. PRE-ACTION GATE (ATSF v2.0 §4.4)
+   Prevents "Treacherous Turn" — checks trust BEFORE execution
+   → Risk classification → Trust threshold comparison
+   → Gate: PASS or BLOCK (with reason)
+
+3. AUTHORIZATION
+   A3I Orchestrator dispatches to Cognigate /v1/enforce
+   → L0 Velocity check (<2ms)
+   → L1 Tripwire scan (<5ms) — absolute, no override
+   → L2 Critic evaluation (<3s) — multi-provider LLM
+   → Policy Engine constraints
+   → Circuit Breaker check
+   → Decision: ALLOW / DENY / ESCALATE
+
+4. EXECUTION (if authorized)
+   → PRE_EXECUTE hooks (logging, resource allocation)
+   → Action execution with timeout
+   → POST_EXECUTE hooks (cleanup, metric emission)
+   → Retryable error detection
+
+5. TRUST SIGNAL EMISSION
+   Two-lane trust architecture:
+   → FAST LANE: TrustDynamicsEngine (real-time, in-memory, event-driven)
+     - Immediate delta: success_delta / failure_delta / timeout_delta
+     - Block reasons: circuit_breaker, degraded, cooldown, zero_delta, rate_limited
+   → SLOW LANE: TrustProfileService (durable, 16-factor evidence aggregation)
+     - Evidence: { factor, score, confidence, source, timestamp }
+     - Persisted to DB for audit trail
+
+6. PROOF RECORDING
+   → SHA-256 hash-linked proof record (append-only chain)
+   → Links to previous proof via hash
+   → Includes: decision, trust_score, risk_level, enforcement_details
+   → Async write — never blocks the response
+
+7. TRUST DECAY (background)
+   → 182-day stepped decay with 9 milestones
+   → 50% floor — agents never fully lose earned trust from inactivity
+   → Runs on trust resolution cache miss
+```
+
+### Key Agent Subsystems
+
+**A3I Orchestrator** (`packages/a3i/src/orchestrator/`):
+- Central coordinator: Intent → Authorization → Execution → Trust Signal → Proof
+- Combines `AuthorizationEngine`, `ExecutionEngine`, `TrustProfileService`, `TrustSignalPipeline`
+- Options: `authorizeOnly` (dry-run), custom executors, correlation IDs
+- Emits timing breakdown: `authorizationMs`, `executionMs`, `profileLookupMs`
+
+**TrustFacade** (`packages/runtime/src/trust-facade/`):
+- Unified trust interface combining Gate Trust (admission) + Dynamic Trust (session-level)
+- Observation tier ceilings: BLACK_BOX=500, GRAY_BOX=800, WHITE_BOX=1000
+- Cache layer for gate trust lookups — 30s TTL
+
+**IntentPipeline** (`packages/runtime/src/intent-pipeline/`):
+- Lightweight pipeline: Intent → Gate Check → Authorization → Execution → Proof
+- Metrics: `totalIntents`, `allowedIntents`, `deniedIntents`, `totalProcessingTimeMs`
+
+**PreActionGate** (`packages/a3i/src/gate/`):
+- ATSF v2.0 Section 4.4 implementation
+- Risk classification → trust threshold comparison → gate PASS/BLOCK
+- Prevents the "Treacherous Turn" — no trust bypass before execution
+
+**TrustSignalPipeline** (`packages/a3i/src/trust/`):
+- Fast lane: `TrustDynamicsEngine` — real-time, event-driven, in-memory
+- Slow lane: `TrustProfileService` — evidence aggregation, durable, 16-factor
+- Flow: Signal → Fast lane delta → TrustEvidence → Slow lane persist
+
+**ExecutionEngine** (`packages/a3i/src/execution/`):
+- Hook-based: `PRE_EXECUTE` → Execute → `POST_EXECUTE`
+- `ActionExecutor<TParams, TResult>` function type for custom actions
+- Retryable error detection, configurable timeouts
+
+**ATSF Sandbox** (`packages/atsf-core/`):
+- Training sandbox: scorer, runner, promotion, graduation, challenges
+- Agents prove trustworthiness before getting elevated trust tiers
+- Governance proof-bridge connects sandbox results to the proof chain
+
+**Council** (`packages/council/`):
+- Multi-agent council voting for collective decisions
+- Quorum-based, weighted by trust tier
+
+### Deep Space Modules (Cognigate — Advanced Analytics)
+
+These are server-side analytical tools exposed via `/v1/deepspace/*`:
+
+| Module | Purpose | Key Output |
+|--------|---------|------------|
+| **TMR Consensus** | Triple Modular Redundancy — multi-model LLM voting | Consensus factor (0–1), degradation level, pairwise divergence matrix |
+| **Monte Carlo** | 4-band risk forecasting (GREEN/YELLOW/ORANGE/RED) | Risk band, failure probability, chain forecast over N steps |
+| **Self-Healing** | GA-evolved governance parameters | Optimized `TrustParams`, fitness scores, phased blending (SHADOW → PARTIAL → FULL) |
+
+### n8n Automation Integration
+
+**`packages/n8n-nodes-cognigate/`** — No-code governance orchestration:
+- 8 resources: Agent, Compliance, Enforce, Health, Intent, Proof, Reference, Trust
+- Full CRUD + specialized operations per resource
+- `cognigateApi` credential type with `X-API-Key` header auth
+- Enables non-developers to build governance workflows visually
+
+### Agent Development Checklist
+
+When implementing a new agent capability:
+1. **Define the intent schema** — Zod schema in `@vorionsys/contracts`, Pydantic model in Cognigate
+2. **Add risk signals** — What makes this action risky? Map to existing risk classification
+3. **Wire the gate** — PreActionGate must evaluate the new action type
+4. **Add tripwire patterns** — If the action could be abused, add L1 regex patterns
+5. **Create trust signal mappings** — Define success/failure/timeout deltas
+6. **Write the executor** — Implement `ActionExecutor<TParams, TResult>` with timeout
+7. **Add proof recording** — Ensure the proof chain captures the new action type
+8. **Test adversarially** — Write tests that try to bypass every guard
+9. **Update constants** — If new thresholds or capabilities, sync `constants_bridge.py` ↔ `shared-constants`
+10. **Document the flow** — Update architecture docs with the new path
