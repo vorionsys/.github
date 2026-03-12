@@ -650,3 +650,161 @@ When implementing a new agent capability:
 8. **Test adversarially** — Write tests that try to bypass every guard
 9. **Update constants** — If new thresholds or capabilities, sync `constants_bridge.py` ↔ `shared-constants`
 10. **Document the flow** — Update architecture docs with the new path
+
+---
+
+## Council Orchestration System
+
+### Architecture & Purpose
+
+The **Council** (`@vorionsys/council`) is a multi-agent orchestration pipeline that processes requests through specialized AI agents with governance, compliance, QA, and cost tracking built in. It is the **client-side orchestration layer** — Cognigate is the **server-side enforcement authority**.
+
+```
+User Request → Council Pipeline → Governed Response
+                   │
+                   ├── Master Planner (decompose into tasks)
+                   ├── Compliance Team (4× parallel policy checks)
+                   ├── Router (select models + agents)
+                   ├── Execution (domain specialists via ai-gateway)
+                   ├── QA Review (5-dimension scoring)
+                   └── Human Gateway (escalation when needed)
+```
+
+**Boundary rule**: Council handles **orchestration and quality**. Cognigate handles **trust, enforcement, and proof**. Council MAY call Cognigate for authoritative decisions, but never duplicates trust score management or proof chain recording.
+
+### Current Agent Inventory (7 implemented)
+
+| Agent | File | Role | LLM Model Priority |
+|-------|------|------|-------------------|
+| **Master Planner** | `master-planner.ts` | Decomposes requests into task steps | `reasoning/complex` |
+| **Compliance** (×4) | `compliance.ts` | Parallel PII/policy/safety/ethical checks | `privacy/general` |
+| **Routing** | `routing.ts` | Selects execution agents + models | Internal logic |
+| **QA** | `qa.ts` | 5-dimension review (completeness, accuracy, clarity, relevance, safety) | `reasoning/medium` |
+| **Human Gateway** | `human-gateway.ts` | Escalation to human reviewer | N/A |
+| **Meta-Orchestrator** | `meta-orchestrator.ts` | Coordinates full pipeline flow | N/A |
+
+### Planned Agents (build priority order)
+
+| # | Agent | Purpose | Tier Gate | Revenue Hook |
+|---|-------|---------|-----------|-------------|
+| 1 | **Cost Optimizer** | Track spend per request, suggest cheaper routes, enforce budget caps | All tiers | Usage dashboards, cost alerts |
+| 2 | **Security Auditor** | Deep scan outputs for prompt injection artifacts, data exfil, PII leakage | Academy+ | Certification requirement |
+| 3 | **Citation Validator** | Verify factual claims against knowledge bases, detect hallucinations | Gold+ cert | Hallucination-free badge |
+| 4 | **Summarizer** | Compress outputs, extract key decisions, generate TL;DR | Free tier | Adoption funnel |
+| 5 | **Domain: Finance** | SOX/SEC compliance, financial advice guardrails, number validation | Enterprise | Vertical pack |
+| 6 | **Domain: Healthcare** | HIPAA guardrails, medical advice disclaimers, PHI detection | Enterprise | Vertical pack |
+| 7 | **Domain: Legal** | Legal disclaimer injection, jurisdiction awareness, privilege detection | Enterprise | Vertical pack |
+| 8 | **Domain: Code** | Code review, license scanning, vulnerability detection in generated code | Pro+ | Developer tier |
+| 9 | **Tone/Brand** | Ensure outputs match client brand voice, terminology, style guide | Pro+ | Brand consistency |
+
+### Council Agent Development Standards
+
+Every new council agent MUST:
+1. **Implement the `CouncilAgent` pattern** — `async run(state: CouncilState): Promise<CouncilState>`
+2. **Use ai-gateway for all LLM calls** — Never direct API calls. Gateway handles routing, fallback, carbon tracking.
+3. **Return structured results** — Score, pass/fail, reasoning. Never unstructured text.
+4. **Have a fallback path** — If LLM fails, use heuristic fallback. Council never crashes on provider outage.
+5. **Track cost** — Every LLM call must report `cost` via gateway response. Accumulated in `state.totalCost`.
+6. **Be independently testable** — Agent can run in isolation with mock state. No hidden dependencies.
+7. **Declare tier requirements** — Which service tiers can use this agent (free/pro/academy/enterprise).
+
+---
+
+## Internal Governance & Compliance Procedures
+
+### Audit Trail Requirements
+
+Every AI-generated output in the Vorion ecosystem MUST be traceable. This is not optional — it is a legal and contractual requirement for enterprise customers.
+
+| What | Where | Retention |
+|------|-------|-----------|
+| Council decisions (plan, compliance, QA scores) | `council_logs` table + proof chain | 90 days minimum, 1 year for enterprise |
+| LLM API calls (model, tokens, cost, latency) | `usage_logs` table (Supabase) | 30 days for free, 1 year for paid |
+| Enforcement decisions (allow/deny/escalate) | Cognigate proof chain (SHA-256 linked) | Immutable, never deleted |
+| Trust score changes | Cognigate `trust_events` table | Immutable, never deleted |
+| Human escalation decisions | `audit_logs` table with reviewer ID | 1 year minimum |
+| Configuration changes (policies, thresholds) | Git commit history + `audit_logs` | Permanent (git) |
+
+### Cost Accounting Rules
+
+1. **Every LLM call tracks cost** — The ai-gateway carbon tracker and cost fields are mandatory, not optional
+2. **Per-request cost ceiling** — Council enforces `maxCost` from request. Default: $0.10 for free, $1.00 for pro, $10.00 for enterprise
+3. **Per-tenant monthly budget** — Tracked in `usage_logs`, enforced by middleware before council execution
+4. **Cost attribution** — Every LLM call is attributed to: `tenant_id`, `agent_id`, `council_request_id`, `model_used`
+5. **Margin tracking** — Internal cost (what we pay providers) vs customer cost (what we charge). Minimum 3× margin on LLM pass-through.
+
+### Security Compliance Checklist
+
+Before any release that touches governance, enforcement, or trust:
+- [ ] **No secrets in code** — All API keys, tokens, credentials via env vars. Scan with `git-secrets` or `trufflehog`.
+- [ ] **Input validation at every boundary** — Pydantic (Python) or Zod (TS). No raw user input reaches business logic.
+- [ ] **Rate limiting active** — Every public endpoint has L0 velocity limits. No unauthenticated endpoints without rate limits.
+- [ ] **Proof chain intact** — Run `test_invariants.py` to verify SHA-256 linkage is unbroken.
+- [ ] **Tripwires updated** — If new attack vectors identified, add L1 regex patterns before shipping.
+- [ ] **Adversarial tests pass** — `test_adversarial.py` (Python) and `tests/adversarial/` (TS) all green.
+- [ ] **Dependency audit clean** — `pip-audit` (Python), `npm audit` (TS). No critical/high CVEs.
+- [ ] **SPDX headers present** — Every source file has license identifier.
+
+### Repo Synchronization Protocol
+
+The public repo (`vorionsys/vorion`) is a synced subset of the private repo (`voriongit/vorion`). **All source code in `packages/` and `apps/` is identical between repos.**
+
+| Action | Process |
+|--------|---------|
+| **Code change in public** | Apply same change to private. Commit both. Push both. |
+| **Code change in private** | Apply same change to public (unless in private-only dirs). Commit both. Push both. |
+| **Private-only content** | `_bmad/`, `_bmad-output/`, `deploy/`, `docs/proprietary/`, `configs/`, `scripts/`, `tools/`, `analysis/`, `reports/`, `compliance/`, `monitoring/`, `dashboards/`, `progress/` — NEVER sync to public |
+| **Git identity for public** | `"Vorion Systems" <hello@vorion.org>` via `vorionsys` GitHub auth |
+| **Git identity for private** | `chunkstar` GitHub auth (`gh auth switch --user chunkstar` before push) |
+| **Drift detection** | Before major releases, diff `packages/` dirs between repos. Zero drift tolerance. |
+| **Workflow files** | `.github/workflows/` must be manually synced. Changes in one repo must be mirrored. |
+
+---
+
+## Revenue Architecture — How Code Maps to Money
+
+### The Four Revenue Layers
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    REVENUE LAYERS                                    │
+│                                                                     │
+│  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────┐  │
+│  │ npm Packages │   │  Cognigate   │   │     AgentAnchor       │  │
+│  │ (Free/OSS)  │──▶│  API Usage   │──▶│  SaaS Subscriptions    │  │
+│  │ Adoption    │   │  Metered     │   │  free/pro/academy/ent  │  │
+│  │ Funnel      │   │  $/enforce   │   │  $29/$149/custom       │  │
+│  └─────────────┘   └──────────────┘   └────────────────────────┘  │
+│         │                                       │                   │
+│         ▼                                       ▼                   │
+│  ┌─────────────┐                     ┌────────────────────────┐   │
+│  │ Self-Hosted │                     │  CAR Certification     │   │
+│  │ Docker      │                     │  bronze/silver/gold/   │   │
+│  │ Enterprise  │                     │  platinum              │   │
+│  │ License Key │                     │  Per-cert pricing      │   │
+│  └─────────────┘                     └────────────────────────┘   │
+│                                                                     │
+│  Products: Aurais ($29/$149/custom), AgentAnchor (B2B SaaS),       │
+│            CAR Certification (per-cert), Docker (license key),      │
+│            n8n Nodes (adoption funnel), Council (OSS + premium)     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Monetization Rules for New Features
+
+1. **Open-source the engine, monetize the platform** — Core packages (`council`, `ai-gateway`, `a3i`, `atsf-core`) are Apache-2.0 OSS. The hosted platform (AgentAnchor), certification service (CAR), and enterprise features are paid.
+2. **Every new agent must declare its tier gate** — Which subscription tier is required to activate this agent? Free agents drive adoption; premium agents drive revenue.
+3. **Usage metering is non-negotiable** — Every LLM call, every enforcement, every certification run is metered and attributed. If you can't bill for it, you can't track it.
+4. **Vertical domain packs are premium** — Finance, Healthcare, Legal, Code domain agents are enterprise features. They require domain-specific training data and compliance knowledge.
+5. **Certification is recurring revenue** — Certificates expire (30–365 days by tier). Recertification is required. Grace periods are short (7–30 days).
+6. **Self-hosted requires license key** — Docker enterprise deployments validate license keys. Air-gap mode still requires pre-provisioned keys.
+
+### Council Consumption Models
+
+| Integration Pattern | Who Uses It | How It Works |
+|-------------------|-------------|--------------|
+| **AgentAnchor API Route** | SaaS customers | Next.js API route → `CouncilOrchestrator.process()` → ai-gateway → LLM. Council runs server-side, customer never sees it. |
+| **npm Package (Direct)** | Self-hosted / Developers | `npm install @vorionsys/council` → bring-your-own LLM keys → local execution. Free tier of adoption funnel. |
+| **n8n Node** | No-code users | Visual workflow builder → `n8n-nodes-cognigate` → Cognigate API. Council logic via workflow steps. |
+| **Docker Compose** | Enterprise on-prem | Full stack container deployment with council as internal service. License-key gated. |
+| **Cognigate-Delegated** | High-security / Regulated | Council submits to Cognigate `/v1/enforce` for authoritative decisions. Cognigate is the single source of truth. |
